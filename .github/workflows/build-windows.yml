@@ -1,0 +1,99 @@
+# Installed in the public azzurri-desktop-releases repository by the owner.
+name: Build and publish Windows update
+
+on:
+  push:
+    tags: ['build-*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: azzurri-windows-publication
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      DESKTOP_RELEASE_REPOSITORY: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out the current private main branch
+        uses: actions/checkout@v4
+        with:
+          repository: mahmoodgazi710-cpu/azzurri-pizza
+          ref: main
+          path: source
+          ssh-key: ${{ secrets.AZZURRI_SOURCE_READ_KEY }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.11.1'
+          cache: npm
+          cache-dependency-path: |
+            source/azzurri-site/package-lock.json
+            source/azzurri-site/desktop/package-lock.json
+      - name: Select the next version or skip an already released commit
+        id: version
+        working-directory: source/azzurri-site/desktop
+        run: node prepare-automatic-release.mjs
+      - name: Install interface dependencies
+        if: steps.version.outputs.skip != 'true'
+        working-directory: source/azzurri-site
+        run: npm ci --no-audit --no-fund
+      - name: Install desktop dependencies
+        if: steps.version.outputs.skip != 'true'
+        working-directory: source/azzurri-site/desktop
+        run: npm ci --no-audit --no-fund
+      - name: Test update lifecycle and version selection
+        if: steps.version.outputs.skip != 'true'
+        working-directory: source/azzurri-site/desktop
+        run: npm run test:updates
+      - name: Check TypeScript
+        if: steps.version.outputs.skip != 'true'
+        working-directory: source/azzurri-site
+        run: npm run typecheck
+      - name: Build the Windows installer and update manifest
+        if: steps.version.outputs.skip != 'true'
+        working-directory: source/azzurri-site/desktop
+        run: npm run dist
+      - name: Test local records and website synchronization
+        if: steps.version.outputs.skip != 'true'
+        working-directory: source/azzurri-site
+        run: node --experimental-vm-modules --test desktop/test.mjs
+      - name: Verify the packaged dashboard and update notices
+        if: steps.version.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
+          $env:AZZURRI_SMOKE_DATA = Join-Path $env:RUNNER_TEMP ('azzurri-smoke-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $env:AZZURRI_SMOKE_DATA | Out-Null
+          $process = Start-Process -FilePath './source/outputs/windows/win-unpacked/AZZURRI Admin.exe' -ArgumentList '--smoke-test' -WindowStyle Hidden -PassThru
+          if (!$process.WaitForExit(90000)) { Stop-Process -Id $process.Id; throw 'Packaged app verification timed out.' }
+          $result = Join-Path $env:AZZURRI_SMOKE_DATA 'smoke-result.json'
+          if ($process.ExitCode -ne 0 -or !(Test-Path $result)) {
+            Get-Content (Join-Path $env:AZZURRI_SMOKE_DATA 'smoke-error.txt') -ErrorAction SilentlyContinue
+            throw 'Packaged app verification failed.'
+          }
+          if (!(Get-Content -Raw $result | ConvertFrom-Json).ok) { throw 'Packaged app verification did not pass.' }
+      - name: Publish the tested update
+        if: steps.version.outputs.skip != 'true'
+        working-directory: source/azzurri-site/desktop
+        env:
+          AZZURRI_RELEASE_SOURCE_SHA: ${{ steps.version.outputs.source_sha }}
+        run: node publish-release.mjs
+      - name: Show the result
+        if: success()
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_SKIPPED: ${{ steps.version.outputs.skip }}
+        run: |
+          if ($env:RELEASE_SKIPPED -eq 'true') {
+            'The current main commit is already published.' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          } else {
+            "Published AZZURRI Admin $env:RELEASE_VERSION. Installed apps can now discover the update." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          }
