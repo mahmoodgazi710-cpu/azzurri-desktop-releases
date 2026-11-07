@@ -56,6 +56,10 @@ jobs:
         if: steps.version.outputs.skip != 'true'
         working-directory: source/azzurri-site
         run: npm run typecheck
+      - name: Test order-ready WhatsApp drafts and status changes
+        if: steps.version.outputs.skip != 'true'
+        working-directory: source/azzurri-site/desktop
+        run: npm run test:notifications
       - name: Build the Windows installer and update manifest
         if: steps.version.outputs.skip != 'true'
         working-directory: source/azzurri-site/desktop
